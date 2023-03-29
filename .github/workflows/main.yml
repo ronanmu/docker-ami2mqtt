@@ -21,6 +21,13 @@ jobs:
       -
         name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
+      - 
+        name: Docker Hub Description
+        uses: peter-evans/dockerhub-description@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: peterevans/dockerhub-description        
       -
         name: Build and push
         uses: docker/build-push-action@v4
@@ -28,4 +35,4 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/ami2mqtt:latest
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/ami2mqtt:latest          
