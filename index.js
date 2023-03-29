@@ -39,7 +39,18 @@ var util = require('util')
 var namiLib = require("nami")
 var mqtt = require("mqtt")
 
-var config = require('./config.json');
+const amiPort = (typeof process.env.AMI_PORT !== 'undefined') ? process.env.AMI_PORT : 5038;
+const amiHost = (typeof process.env.AMI_HOST !== 'undefined') ? process.env.AMI_HOST : 'asterisk';
+const amiUser = (typeof process.env.AMI_USERNAME !== 'undefined') ? process.env.AMI_USERNAME : 'asterisk';
+const amiPass = (typeof process.env.AMI_PASSWORD !== 'undefined') ? process.env.AMI_PASSWORD : 'manager';
+const mqttHost = (typeof process.env.MQTT_HOST !== 'undefined') ? process.env.MQTT_HOST : 'mosquitto';
+const mqttPort = (typeof process.env.MQTT_PORT !== 'undefined') ? process.env.MQTT_PORT : 1883;
+const mqttKeepalive = (typeof process.env.MQTT_KEEPALIVE !== 'undefined') ? process.env.MQTT_KEEPALIVE : 60;
+const mqttUser = (typeof process.env.MQTT_USERNAME !== 'undefined') ? process.env.MQTT_USERNAME : null;
+const mqttPass = (typeof process.env.MQTT_PASSWORD !== 'undefined') ? process.env.MQTT_PASSWORD : null;
+const mqttPrefix = (typeof process.env.MQTT_PREFIX !== 'undefined') ? process.env.MQTT_PREFIX : 'pbx';
+
+//var config = require('/config/config.json');
 
 String.prototype.inList = function(list) {
     return (list.indexOf(this.toString()) != -1)
@@ -49,26 +60,7 @@ String.prototype.inList = function(list) {
 
 String.prototype.telnumClean = function() {
 
-    // Replace international prefix
-    // Only meaningful on incoming calls
-    var num = this.replace(/^\+/, config.intl_prefix)
-
-    // Strip internal prefixes
-    Object.keys(config.prefix_strip).forEach(function(key) {
-        if (num.match(RegExp('^' + key + '$'))) {
-            var value = config.prefix_strip[key]
-            num = num.substr(value)
-        }
-    })
-
-    // Add back any long distance prefix
-    Object.keys(config.prefix_add).forEach(function(key) {
-        if (num.match(RegExp('^' + key + '$'))) {
-            var value = config.prefix_add[key]
-            num = value + num
-        }
-    })
-    return num
+    return this
 }
 
 // Is a phone number internal or external 
@@ -77,19 +69,9 @@ var ext_re = ''
 var int_re = ''
 
 String.prototype.isInternal = function() {
-    if (!ext_re) {
-        ext_re = new RegExp('^(' + config.external.join('|') + ')$')
-    }
-    if (!int_re) {
-        int_re = new RegExp('^(' + config.internal.join('|') + ')$')
-    }
 
-    // Does it match external whitelist
-    if (this.match(ext_re)) {
-        return false
-    }
-    // Is it internal
-    if (this.match(int_re)) {
+    // Is it internal. Assume anything shorter than 5 digits is
+    if (this.length < 5) {
         return true
     }
     // Default is assume external
@@ -100,24 +82,17 @@ String.prototype.isExternal = function() {
     return !this.isInternal()
 }
 
-// Not needed with systemd
-// require('log-timestamp')(function() {
-//     return new Date().toString() + ": %s"
-// });
+var ami_conf = {
+   "host": amiHost,
+   "port": amiPort,
+   "username": amiUser,
+   "secret": amiPass
+}
 
-// require( "console-stamp" )( console, {
-//    formatter:function(){
-//        return new Error().stack + "\n"
-//    }
-// } );
-
-var ami_conf = config.ami_conf
-
-var mqtt_conf = config.mqtt_conf
 
 /* Incoming lines => event.connectedlinenum */
 
-var trunks = config.trunks
+var trunks = {}
 
 var callers = {}
 
@@ -129,16 +104,16 @@ var ami_activity = Date.now()
 var mqtt_activity = Date.now()
 
 var client = mqtt.connect({
-    host: mqtt_conf.host,
-    port: mqtt_conf.port,
-    username: mqtt_conf.username,
-    password: mqtt_conf.password,
-    keepalive: mqtt_conf.keepalive
+    host: mqttHost,
+    port: mqttPort,
+    username: mqttUser,
+    password: mqttPass,
+    keepalive: mqttKeepalive
 })
 
 client.on('connect', function() {
     console.log("Connected to MQTT Broker")
-    client.subscribe(mqtt_conf.ping_topic)
+    client.subscribe(mqttPrefix + '/_ping')
 })
 
 var nami = new(namiLib.Nami)(ami_conf)
@@ -209,7 +184,7 @@ nami.on('namiEvent', function(event) {
         }
         calls[event.linkedid] = tmp;
 
-        client.publish(mqtt_conf.trunk_prefix + '/' + trunk, JSON.stringify(tmp))
+        client.publish(mqttPrefix + '/trunk/' + trunk, JSON.stringify(tmp))
     }
     // Trunk outgoing
     else if (event.event === 'DialBegin' &&
@@ -230,7 +205,7 @@ nami.on('namiEvent', function(event) {
 
         calls[event.linkedid] = tmp;
 
-        client.publish(mqtt_conf.trunk_prefix + '/' + trunk, JSON.stringify(tmp))
+        client.publish(mqttPrefix + '/trunk/' + trunk, JSON.stringify(tmp))
     }
     // Trunk Answer
     else if (event.event === 'DialEnd' &&
@@ -245,7 +220,7 @@ nami.on('namiEvent', function(event) {
         tmp.state = 'answer'
         tmp.timestamp = Date()
 
-        client.publish(mqtt_conf.trunk_prefix + '/' + trunk, JSON.stringify(tmp))
+        client.publish(mqttPrefix + '/trunk/' + trunk, JSON.stringify(tmp))
     }
     // Trunk Hangup
     else if (event.event === 'Hangup' &&
@@ -257,7 +232,7 @@ nami.on('namiEvent', function(event) {
         tmp.state = 'hangup'
         tmp.timestamp = Date()
 
-        client.publish(mqtt_conf.trunk_prefix + '/' + trunk, JSON.stringify(tmp))
+        client.publish(mqttPrefix + '/trunk/' + trunk, JSON.stringify(tmp))
     }
 
     // Internal/Extension processing
@@ -281,9 +256,9 @@ nami.on('namiEvent', function(event) {
         }
 
 	if ( tmp.from_num && tmp.from_num.isInternal() && !calls[event.linkedid].trunk ) {
-		client.publish(mqtt_conf.ext_prefix + '/' + tmp.from_num , JSON.stringify(tmp))
+		client.publish(mqttPrefix + '/extension/' + tmp.from_num , JSON.stringify(tmp))
 	}
-        client.publish(mqtt_conf.ext_prefix + '/' + ext, JSON.stringify(tmp))
+        client.publish(mqttPrefix + '/extension/' + ext, JSON.stringify(tmp))
     }
     // Extension Answer
     else if (event.event === 'DialEnd' &&
@@ -301,9 +276,9 @@ nami.on('namiEvent', function(event) {
         }
 
 	if ( tmp.from_num && !calls[event.linkedid].trunk ) {
-		client.publish(mqtt_conf.ext_prefix + '/' + tmp.from_num , JSON.stringify(tmp))
+		client.publish(mqttPrefix + '/extension/' + tmp.from_num , JSON.stringify(tmp))
 	}
-        client.publish(mqtt_conf.ext_prefix + '/' + ext, JSON.stringify(tmp))
+        client.publish(mqttPrefix + '/extension/' + ext, JSON.stringify(tmp))
     }
     // Extension Hangup
     else if (event.event === 'Hangup' &&
@@ -323,9 +298,9 @@ nami.on('namiEvent', function(event) {
         }
 
 	if ( tmp.from_num && !calls[event.linkedid].trunk ) {
-		client.publish(mqtt_conf.ext_prefix + '/' + tmp.from_num , JSON.stringify(tmp))
+		client.publish(mqttPrefix + '/extension/' + tmp.from_num , JSON.stringify(tmp))
 	}
-        client.publish(mqtt_conf.ext_prefix + '/' + ext, JSON.stringify(tmp))
+        client.publish(mqttPrefix + '/extension/' + ext, JSON.stringify(tmp))
     }
 })
 
@@ -361,7 +336,7 @@ setInterval(function() {
 
 // MQTT Keepalive
 setInterval(function() {
-    client.publish(mqtt_conf.ping_topic, JSON.stringify({
+    client.publish(mqttPrefix + '/_ping', JSON.stringify({
         timestamp: Date()
     }))
 }, 60000)
